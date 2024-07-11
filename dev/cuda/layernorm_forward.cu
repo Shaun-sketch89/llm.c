@@ -113,6 +113,7 @@ __global__ void layernorm_forward_kernel1(float* out, float* mean, float* rstd,
 
 __global__ void mean_kernel(float* mean, const float* inp, int N, int C, int block_size) {
     extern __shared__ float shared[];
+    // use a block to handle a token, use threads in a block to handle reduction of C channels of a token.
     int idx = blockIdx.x; // range [0, B*T)
     int tid = threadIdx.x; // range [0, block_size)
     const float* x = inp + idx * C;
