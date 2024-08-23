@@ -338,7 +338,7 @@ __global__ void layernorm_forward_kernel5(float* __restrict__ out, float* __rest
     }
 }
 
-// trying to use one kernel, calculate E(x), E(x^2). use a block to handle a token
+// trying to use one kernel, simultaneously calculate E(x), E(x^2). use a block to handle a token
 __global__ void layernorm_forward_kernel6(float* out, float* mean, float* rstd,
                                           const float* inp, const float* weight, const float* bias,
                                           int N, int C) {
