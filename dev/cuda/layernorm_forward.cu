@@ -338,6 +338,46 @@ __global__ void layernorm_forward_kernel5(float* __restrict__ out, float* __rest
     }
 }
 
+// trying to use one kernel, calculate E(x), E(x^2). use a block to handle a token
+__global__ void layernorm_forward_kernel6(float* out, float* mean, float* rstd,
+                                          const float* inp, const float* weight, const float* bias,
+                                          int N, int C) {
+    extern __shared__ float shared[];
+    // use a block to handle a token, use threads in a block to handle reduction of C channels of a token.
+    int idx = blockIdx.x; // range [0, B*T)
+    int tid = threadIdx.x; // range [0, block_size)
+    const float* x = inp + idx * C;
+    // thread coarsening
+    float sum = 0.0f;
+    float sum2 = 0.0f;
+    for (int i = tid; i < C; i += block_size) {
+        sum += x[i];
+        sum2 += x[i] * x[i];
+    }
+    shared[tid] = sum;
+    shared[tid + block_size] = sum2;
+    __syncthreads();
+    // reductions
+    for (int stride = block_size / 2; stride >= 1; stride /= 2) {
+        __syncthreads();
+        if (tid < stride) {
+            shared[tid] += shared[tid + stride];
+            shared[tid + block_size] += shared[tid + stride + block_size];
+        }
+    }
+    // write the final result (at thread 0) to global memory
+    if (tid == 0) {
+        mean[idx] = shared[0] / C;
+        rstd[idx] = rsqtf(shared[block_size] / C - mean[idx] * mean[idx] + 1e-5);
+    }
+    // calculate out
+    float* y = out + idx * C;
+    for (int i = tid; i < C; i += block_size) {
+        float n = rstd[idx] * (x[tid] - mean[idx]);
+        y[tid] = weight[tid] * n + bias[tid];
+    }
+}
+
 // ----------------------------------------------------------------------------
 // kernel launcher
 
@@ -401,6 +441,16 @@ void layernorm_forward5(float* out, float* mean, float* rstd,
     cudaCheck(cudaGetLastError());
 }
 
+void layernorm_forward6(float* out, float* mean, float* rstd,
+                        const float* inp, const float* weight, const float* bias,
+                        int B, int T, int C,
+                        const int block_size) {
+    int numBlocks = B * T;
+    // sharedMem = 2 * block_size * sizeof(float), 1 for sum(x), 1 for sum(x^2)
+    layernorm_forward_kernel6<<<numBlocks, block_size, 2 * block_size * sizeof(float)>>>(out, inp, mean, rstd, weight, bias, B, T, C);
+    cudaCheck(cudaGetLastError());
+}
+
 // kernel version dispatch
 void layernorm_forward(int kernel_num,
                     float* out, float* mean, float* rstd,
@@ -422,6 +472,9 @@ void layernorm_forward(int kernel_num,
             break;
         case 5:
             layernorm_forward5(out, mean, rstd, inp, weight, bias, B, T, C, block_size);
+            break;
+        case 6:
+            layernorm_forward6(out, mean, rstd, inp, weight, bias, B, T, C, block_size);
             break;
         default:
             printf("Invalid kernel number\n");
